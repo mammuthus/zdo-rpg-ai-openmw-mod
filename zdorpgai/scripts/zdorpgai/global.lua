@@ -155,8 +155,10 @@ local function showConnectedIndicator()
 end
 
 local function handleStartSession(msg)
+    local data = msg.data or {}
     clientConnected = true
-    print('[ZDORPG] Client connected')
+    print('[ZDORPG] Client connected (session: ' .. tostring(data.sessionId) .. ')')
+    respond('StartSessionAck', msg.id, { sessionId = data.sessionId })
     showConnectedIndicator()
 end
 
