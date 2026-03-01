@@ -8,13 +8,14 @@ local ipc = {}
 
 --- Read incoming messages from zdorpgai_to_mod.txt via VFS.
 -- File format:
---   Line 1: lastProcessedMessageId:$ID  (ack of mod's messages)
+--   Line 1: session:$SESSION_ID
 --   Lines 2+: JSON messages {id, type, responseTo?, data?}
--- @param vfs              the openmw.vfs module
--- @param lastSeenClientMsgId  last processed client message id (-1 initially)
--- @return messages (array of tables), newLastSeenClientMsgId
---         or nil if nothing new / file unreadable
-function ipc.readIncoming(vfs, lastSeenClientMsgId)
+-- @param vfs                the openmw.vfs module
+-- @param lastSeenClientMsgId  last processed client message id (0 initially)
+-- @param currentSessionId   session ID from last poll (nil if none yet)
+-- @return messages, newLastSeenClientMsgId, sessionId, sessionChanged
+--         or nil if file unreadable / empty
+function ipc.readIncoming(vfs, lastSeenClientMsgId, currentSessionId)
     local ok, handle = pcall(vfs.open, 'zdorpgai_to_mod.txt')
     if not ok or not handle then
         return nil
@@ -27,31 +28,38 @@ function ipc.readIncoming(vfs, lastSeenClientMsgId)
         return nil
     end
 
+    -- Parse session header from first line
     local firstNewline = content:find('\n')
-    if not firstNewline then
+    local header = firstNewline and content:sub(1, firstNewline - 1) or content
+    local sessionId = header:match('^session:(.+)$')
+    if not sessionId then
         return nil
     end
 
-    -- Parse header (lastProcessedMessageId:$ID) — we don't use it since
-    -- the mod doesn't maintain a pending outgoing queue, but skip it.
+    local sessionChanged = (currentSessionId ~= sessionId)
+    if sessionChanged then
+        lastSeenClientMsgId = 0
+    end
 
     local messages = {}
-    local rest = content:sub(firstNewline + 1)
-    for line in rest:gmatch('[^\n]+') do
-        local okDecode, msg = pcall(json.decode, line)
-        if okDecode and msg and type(msg) == 'table' and msg.id and msg.id > lastSeenClientMsgId then
-            messages[#messages + 1] = msg
-            if msg.id > lastSeenClientMsgId then
-                lastSeenClientMsgId = msg.id
+    if firstNewline then
+        local rest = content:sub(firstNewline + 1)
+        for line in rest:gmatch('[^\n]+') do
+            local okDecode, msg = pcall(json.decode, line)
+            if okDecode and msg and type(msg) == 'table' and msg.id and msg.id > lastSeenClientMsgId then
+                messages[#messages + 1] = msg
+                if msg.id > lastSeenClientMsgId then
+                    lastSeenClientMsgId = msg.id
+                end
             end
         end
     end
 
-    if #messages == 0 then
+    if #messages == 0 and not sessionChanged then
         return nil
     end
 
-    return messages, lastSeenClientMsgId
+    return messages, lastSeenClientMsgId, sessionId, sessionChanged
 end
 
 --- Send a message to the client via print() with [ZDORPG_MSG] prefix.

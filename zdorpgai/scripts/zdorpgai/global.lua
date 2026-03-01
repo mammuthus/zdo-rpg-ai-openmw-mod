@@ -12,12 +12,13 @@ local ipc = require('scripts.zdorpgai.ipc')
 -- State
 local POLL_INTERVAL_FRAMES = 5
 local frameCounter = 0
-local lastSeenClientMsgId = -1
+local lastSeenClientMsgId = 0
 local modMsgCounter = 0
 local lastCellName = nil
 local playerObject = nil
 local activeNpcs = {}
 local clientConnected = false
+local currentSessionId = nil
 
 -------------------------------------------------------------------------------
 -- Outgoing helpers
@@ -101,8 +102,12 @@ end
 local function handleSayMp3File(msg)
     local data = msg.data or {}
     local npc = activeNpcs[data.npcId]
-    if not npc then return end
-    local okSay, err = pcall(core.sound.say, 'zdorpgai_mp3/' .. data.mp3Name, npc, '')
+    if not npc then
+        print('[ZDORPG] SayMp3File: NPC not found in activeNpcs: ' .. tostring(data.npcId))
+        return
+    end
+    print('[ZDORPG] SayMp3File: playing ' .. tostring(data.mp3Name) .. ' for ' .. tostring(data.npcId))
+    local okSay, err = pcall(core.sound.say, 'Sound/zdorpgai_mp3/' .. data.mp3Name, npc, '')
     if not okSay then
         print('[ZDORPG] Error playing voice: ' .. tostring(err))
     end
@@ -152,14 +157,6 @@ local function showConnectedIndicator()
     if playerObject then
         playerObject:sendEvent('ZdorpgNotify', { text = 'ZdoRPG connected' })
     end
-end
-
-local function handleStartSession(msg)
-    local data = msg.data or {}
-    clientConnected = true
-    print('[ZDORPG] Client connected (session: ' .. tostring(data.sessionId) .. ')')
-    respond('StartSessionAck', msg.id, { sessionId = data.sessionId })
-    showConnectedIndicator()
 end
 
 local function handleGetCharactersWhoHear(msg)
@@ -422,26 +419,6 @@ local function handleNpcStopAttack(msg)
     print('[ZDORPG] NPC ' .. tostring(npcId) .. ' stopped attacking')
 end
 
-local function handleNpcSpeaks(msg)
-    if not playerObject then return end
-    local data = msg.data or {}
-    local npcName = data.npcId or '???'
-    if data.npcId then
-        local npc = activeNpcs[data.npcId]
-        if npc then
-            local okRec, record = pcall(types.NPC.record, npc)
-            if okRec and record then
-                npcName = record.name
-            end
-        end
-    end
-    playerObject:sendEvent('ZdorpgShowSpeech', {
-        npcName = npcName,
-        text = data.text or '',
-        animate = true,
-    })
-end
-
 local function handleShowMessageBox(msg)
     if not playerObject then return end
     local data = msg.data or {}
@@ -469,8 +446,6 @@ local function processIncomingMessage(msg)
         handlePlayerStartSpeak(msg)
     elseif msg.type == 'PlayerStopSpeak' then
         handlePlayerStopSpeak(msg)
-    elseif msg.type == 'NpcSpeaks' then
-        handleNpcSpeaks(msg)
     elseif msg.type == 'GetCharactersWhoHear' then
         handleGetCharactersWhoHear(msg)
     elseif msg.type == 'SpawnOnGroundInFrontOfCharacter' then
@@ -485,8 +460,6 @@ local function processIncomingMessage(msg)
         handleNpcAttack(msg)
     elseif msg.type == 'NpcStopAttack' then
         handleNpcStopAttack(msg)
-    elseif msg.type == 'StartSession' then
-        handleStartSession(msg)
     elseif msg.type == 'ShowMessageBox' then
         handleShowMessageBox(msg)
     else
@@ -520,8 +493,20 @@ local function onUpdate(dt)
     frameCounter = frameCounter + 1
     if frameCounter % POLL_INTERVAL_FRAMES ~= 0 then return end
 
-    local messages, newLastId = ipc.readIncoming(vfs, lastSeenClientMsgId)
-    if messages then
+    local messages, newLastId, sessionId, sessionChanged =
+        ipc.readIncoming(vfs, lastSeenClientMsgId, currentSessionId)
+
+    if sessionChanged then
+        print('[ZDORPG] Session changed: ' .. tostring(currentSessionId) .. ' -> ' .. tostring(sessionId))
+        currentSessionId = sessionId
+        lastSeenClientMsgId = newLastId or 0
+        modMsgCounter = 0
+        clientConnected = true
+        publish('StartSessionAck', { sessionId = sessionId })
+        showConnectedIndicator()
+    end
+
+    if messages and #messages > 0 then
         lastSeenClientMsgId = newLastId
         for _, msg in ipairs(messages) do
             local ok, err = pcall(processIncomingMessage, msg)
@@ -584,6 +569,7 @@ local function onSave()
         lastSeenClientMsgId = lastSeenClientMsgId,
         lastCellName = lastCellName,
         modMsgCounter = modMsgCounter,
+        currentSessionId = currentSessionId,
     }
 end
 
@@ -599,9 +585,10 @@ end
 
 local function onLoad(data)
     if data then
-        lastSeenClientMsgId = data.lastSeenClientMsgId or -1
+        lastSeenClientMsgId = data.lastSeenClientMsgId or 0
         lastCellName = data.lastCellName
         modMsgCounter = data.modMsgCounter or 0
+        currentSessionId = data.currentSessionId
     end
     rebuildActiveNpcs()
     -- Try to restore playerObject (onPlayerAdded may not fire after reloadlua)
